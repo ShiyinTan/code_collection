@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # find-free-gpus.sh — On hosts from available-hosts.txt, list free GPU indices.
 #
-# Run ON peter, after probe-gpus.sh:
+# Run on a lab host that can SSH to the GPUs (peter or a gpuNN box), after probe:
 #   ./scripts/probe-gpus.sh
 #   ./scripts/find-free-gpus.sh
 #
@@ -70,7 +70,7 @@ done
 
 if [[ ! -f $HOSTS_FILE ]]; then
   echo "error: host list not found: ${HOSTS_FILE}" >&2
-  echo "Run ./scripts/probe-gpus.sh first (on peter), then retry." >&2
+  echo "Run ./scripts/probe-gpus.sh first on this host (or any lab host with SSH to the GPUs), then retry." >&2
   exit 1
 fi
 

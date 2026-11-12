@@ -4,7 +4,7 @@ Code collections
 
 ## GPU probe
 
-**Run on peter.** First list hosts that have GPUs, then find which cards are free:
+Run on a lab host that can SSH to the GPUs (peter or a gpuNN box). First list hosts that have GPUs, then find which cards are free:
 
 ```bash
 ./scripts/probe-gpus.sh
