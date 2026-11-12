@@ -1,4 +1,4 @@
-# Probe outputs (may contain host/user/process info from the lab)
+# Probe outputs
 results/
 *.pem
 *.key

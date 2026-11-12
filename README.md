@@ -2,20 +2,18 @@
 
 Code collections
 
-## GPU probe (gpu01–gpu30 via peter)
+## GPU probe
 
-Probe lab GPU servers through the SSH jump host `peter` (`peter.pi.titech.ac.jp` / lab `192.168.0.254`). Hostnames `gpu01`…`gpu30` resolve on lab DNS (`*.lrlab`) when you route via peter; they are not reachable from the public internet alone.
+Find free GPUs on `gpu01`–`gpu30`. **Run on peter** (lab network):
 
 ```bash
 ./scripts/probe-gpus.sh
 ```
 
-Defaults: jump user `lidy`, remote user `lidy`, hosts `gpu01`–`gpu30`. Overrides:
+SSHs directly to each host as your user (default `$USER`, else `lidy`), checks `nvidia-smi`, and writes free GPUs to:
 
-```bash
-./scripts/probe-gpus.sh -J peter -j lidy -u lidy
-./scripts/probe-gpus.sh --hosts 01,05,10-12
-JUMP_USER=lidy REMOTE_USER=other ./scripts/probe-gpus.sh
+```text
+results/available-gpus.txt
 ```
 
-Requires SSH agent/keys (BatchMode; no password prompts). Writes markdown + JSON under `results/` (gitignored). Needs only bash, OpenSSH, and remote `nvidia-smi`.
+Optional: `./scripts/probe-gpus.sh -u lidy` or `--hosts 01,05,10-12`. Output path is gitignored (`results/`).
