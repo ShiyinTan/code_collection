@@ -22,7 +22,7 @@ Code collections
 
 - Reads `results/available-hosts.txt` (run probe first).
 - Free GPU = no nvidia compute process on that device.
-- `results/free-gpus.txt` — `host:index` lines (e.g. `gpu03:0`); also prints a summary.
+- `results/free-gpus.txt` — one line per free card with index, model, and VRAM, e.g. `gpu03:0  NVIDIA GeForce RTX 3090  24200/24564 MiB` (`free/total`); also printed on stdout.
 
 Both scripts use BatchMode SSH and ignore `known_hosts` for lab key churn. Optional: `-u lidy`. `results/` is gitignored.
 
