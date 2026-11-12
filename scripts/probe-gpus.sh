@@ -12,6 +12,7 @@
 #   results/gpu-status.txt       — included / skipped reasons
 #
 # Optional: -u USER, --hosts 01,05,10-12, -o OUT, --status STATUS
+# SSH for the probe disables known_hosts checks (lab keys change often).
 
 set -euo pipefail
 
@@ -88,7 +89,7 @@ mkdir -p "$(dirname "$OUT")" "$(dirname "$STATUS_OUT")"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/probe-gpus.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# Count GPUs; always exit 0 so SSH success != "host has free GPU".
+# Count GPUs; always exit 0 so a busy/empty query cannot fail SSH.
 REMOTE_CMD=$(cat <<'EOS'
 set +e
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -101,15 +102,24 @@ exit 0
 EOS
 )
 
+# Lab LAN: host keys often rotate / DNS+IP collide in known_hosts.
+# accept-new is NOT enough for *changed* keys (BatchMode then fails rc=255).
+# For this probe only, ignore known_hosts so we still connect non-interactively.
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout="$CONNECT_TIMEOUT"
+  -o ConnectionAttempts=1
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o GlobalKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+)
+
 probe_one() {
   local host=$1
   local rc=0
   set +e
-  ssh \
-    -o BatchMode=yes \
-    -o ConnectTimeout="$CONNECT_TIMEOUT" \
-    -o StrictHostKeyChecking=accept-new \
-    -o ConnectionAttempts=1 \
+  ssh "${SSH_OPTS[@]}" \
     "${REMOTE_USER}@${host}" \
     "$REMOTE_CMD" >"${TMP}/${host}.out" 2>"${TMP}/${host}.err"
   rc=$?
