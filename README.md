@@ -4,21 +4,29 @@ Code collections
 
 ## GPU probe
 
-List `gpu01`–`gpu30` hosts that have GPUs. **Run on peter**:
+**Run on peter.** First list hosts that have GPUs, then find which cards are free:
 
 ```bash
 ./scripts/probe-gpus.sh
+./scripts/find-free-gpus.sh
 ```
+
+### `probe-gpus.sh`
 
 - Includes a host if `nvidia-smi` reports ≥1 GPU (busy or free — no idle filter).
 - Skips unreachable hosts and hosts with no GPU / no `nvidia-smi`.
 - `results/available-hosts.txt` — hostnames only, one per line
 - `results/gpu-status.txt` — included / skipped reasons
-- Probe SSH ignores `known_hosts` (`StrictHostKeyChecking=no`) so changed lab host keys do not fail BatchMode.
 
-Optional: `./scripts/probe-gpus.sh -u lidy` or `--hosts 01,05,10-12`. `results/` is gitignored.
+### `find-free-gpus.sh`
 
-If you prefer to keep strict host-key checks for interactive SSH, purge a stale entry instead, e.g.:
+- Reads `results/available-hosts.txt` (run probe first).
+- Free GPU = no nvidia compute process on that device.
+- `results/free-gpus.txt` — `host:index` lines (e.g. `gpu03:0`); also prints a summary.
+
+Both scripts use BatchMode SSH and ignore `known_hosts` for lab key churn. Optional: `-u lidy`. `results/` is gitignored.
+
+If you prefer strict host-key checks for interactive SSH, purge a stale entry instead, e.g.:
 
 ```bash
 ssh-keygen -R gpu01 -R 192.168.0.21
