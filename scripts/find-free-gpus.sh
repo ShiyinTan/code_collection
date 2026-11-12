@@ -7,11 +7,11 @@
 #
 # Reads hostnames from results/available-hosts.txt (one per line; # comments OK).
 # Free GPU = no nvidia compute process on that device (residual memory/util alone
-# does not mark a GPU busy). Format: host:index (e.g. gpu03:0).
+# does not mark a GPU busy).
 #
-# Outputs:
-#   results/free-gpus.txt
-# Also prints a short summary to stdout. Unreachable hosts are noted and skipped.
+# Output line format (results/free-gpus.txt + stdout):
+#   host:index  name  free_mib/total_mib MiB
+# e.g. gpu03:0  NVIDIA GeForce RTX 3090  24200/24564 MiB
 #
 # Optional: -u USER, -i HOSTS_FILE, -o OUT
 # SSH options match probe-gpus.sh (BatchMode; ignore known_hosts for lab keys).
@@ -42,6 +42,17 @@ valid_uuid() {
   [[ -n $s && $s != \[N/A\] && $s != N/A ]]
 }
 
+na_num() {
+  # Normalize nvidia [N/A] / blank to 0 for arithmetic.
+  local s
+  s=$(trim "${1:-0}")
+  if [[ -z $s || $s == \[N/A\] || $s == N/A ]]; then
+    echo 0
+  else
+    echo "$s"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage 0 ;;
@@ -67,7 +78,6 @@ HOSTS=()
 while IFS= read -r line || [[ -n ${line:-} ]]; do
   line=$(trim "$line")
   [[ -z $line || $line == \#* ]] && continue
-  # allow "gpu03" or stray "gpu03:0" → take hostname before ':'
   host=${line%%:*}
   host=$(trim "$host")
   [[ -n $host ]] && HOSTS+=("$host")
@@ -83,7 +93,8 @@ mkdir -p "$(dirname "$OUT")"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/find-free-gpus.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# Dump GPU index/uuid/name + compute apps. Always exit 0 after query.
+# name last so commas in the name (rare) do not break fixed fields.
+# Always exit 0 after query so SSH does not look like failure.
 REMOTE_CMD=$(cat <<'EOS'
 set +e
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -92,7 +103,8 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 echo 'META|ok'
 echo '---GPUS---'
-nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>/dev/null
+nvidia-smi --query-gpu=index,uuid,memory.used,memory.total,name \
+  --format=csv,noheader,nounits 2>/dev/null
 echo '---PROCS---'
 nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory \
   --format=csv,noheader,nounits 2>/dev/null
@@ -138,7 +150,7 @@ wait
 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
   echo "# free GPUs — ${stamp}"
-  echo "# format: host:index"
+  echo "# format: host:index  name  free_mib/total_mib MiB"
   echo "# free = no nvidia compute process on that GPU"
   echo "# hosts file: ${HOSTS_FILE}"
   echo "# ssh user: ${REMOTE_USER}"
@@ -149,6 +161,20 @@ free_total=0
 hosts_with_free=0
 unreachable=0
 reachable=0
+
+record_free() {
+  local host=$1 idx=$2 name=$3 mem_used=$4 mem_total=$5
+  local free_mib line
+  mem_used=$(na_num "$mem_used")
+  mem_total=$(na_num "$mem_total")
+  free_mib=$((mem_total - mem_used))
+  if ((free_mib < 0)); then free_mib=0; fi
+  [[ -n $name ]] || name='(unknown)'
+  line=$(printf '%s:%s  %s  %s/%s MiB' "$host" "$idx" "$name" "$free_mib" "$mem_total")
+  printf '%s\n' "$line" >>"$OUT"
+  free_lines+=("$line")
+  free_total=$((free_total + 1))
+}
 
 for host in "${HOSTS[@]}"; do
   rc=$(cat "${TMP}/${host}.rc" 2>/dev/null || echo 255)
@@ -177,7 +203,6 @@ for host in "${HOSTS[@]}"; do
   while IFS= read -r line || [[ -n ${line:-} ]]; do
     line=$(trim "$line")
     [[ -z $line || $line == \#* ]] && continue
-    # Skip CSV header if present; skip pure [N/A] rows.
     [[ $line == gpu_uuid* || $line == \[N/A\]* ]] && continue
     IFS=',' read -r guuid pid _rest <<<"$line"
     guuid=$(trim "${guuid:-}")
@@ -187,41 +212,45 @@ for host in "${HOSTS[@]}"; do
     busy_uuid[$guuid]=1
   done <<<"$procs_block"
 
-  free_idxs=()
+  free_lines=()
   while IFS= read -r line || [[ -n ${line:-} ]]; do
     line=$(trim "$line")
     [[ -z $line || $line == \#* ]] && continue
     [[ $line == index* ]] && continue
-    IFS=',' read -r idx uuid name <<<"$line"
+    # index, uuid, mem.used, mem.total, name...
+    IFS=',' read -r idx uuid mem_used mem_total name_rest <<<"$line"
     idx=$(trim "${idx:-}")
     uuid=$(trim "${uuid:-}")
+    mem_used=$(trim "${mem_used:-}")
+    mem_total=$(trim "${mem_total:-}")
+    name=$(trim "${name_rest:-}")
     [[ -n $idx && $idx != \[N/A\] ]] || continue
-    # Empty/invalid UUID: cannot match compute apps; treat as free only if we
-    # have no busy set at all is wrong — skip unsafe blank-key lookup.
+
+    is_free=0
     if ! valid_uuid "$uuid"; then
-      # Fall back: if there are zero compute apps, count free; else skip.
       if ((${#busy_uuid[@]} == 0)); then
-        free_idxs+=("$idx")
-        printf '%s:%s\n' "$host" "$idx" >>"$OUT"
-        free_total=$((free_total + 1))
+        is_free=1
       fi
-      continue
+    elif [[ -z ${busy_uuid[$uuid]+x} ]]; then
+      is_free=1
     fi
-    if [[ -z ${busy_uuid[$uuid]+x} ]]; then
-      free_idxs+=("$idx")
-      printf '%s:%s\n' "$host" "$idx" >>"$OUT"
-      free_total=$((free_total + 1))
+
+    if ((is_free)); then
+      record_free "$host" "$idx" "$name" "$mem_used" "$mem_total"
     fi
   done <<<"$gpus_block"
 
-  if ((${#free_idxs[@]} > 0)); then
+  if ((${#free_lines[@]} > 0)); then
     hosts_with_free=$((hosts_with_free + 1))
-    echo "${host}: free $(IFS=,; echo "${free_idxs[*]}")"
+    echo "${host}:"
+    for fl in "${free_lines[@]}"; do
+      echo "  ${fl}"
+    done
   else
     echo "${host}: no free GPU"
   fi
 
-  unset busy_uuid
+  unset busy_uuid free_lines
 done
 
 echo
