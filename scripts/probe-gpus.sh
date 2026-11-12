@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
-# probe-gpus.sh — From peter, find free GPUs on gpu01..gpu30.
+# probe-gpus.sh — From peter, list gpu01..gpu30 hosts that have GPUs.
 #
-# Run ON peter (already on the lab network):
+# Run ON peter:
 #   ./scripts/probe-gpus.sh
 #
-# SSHs directly to each gpuNN (same user; default: $USER or lidy), runs
-# nvidia-smi, and writes free GPUs to:
-#   results/available-gpus.txt
+# SSH to each host (user: $USER or lidy). If nvidia-smi reports ≥1 GPU,
+# write the hostname. Skip unreachable hosts or hosts with no GPU.
 #
-# Optional:
-#   ./scripts/probe-gpus.sh -u lidy
-#   ./scripts/probe-gpus.sh --hosts 01,05,10-12
-#   OUT=results/available-gpus.txt ./scripts/probe-gpus.sh
+# Outputs:
+#   results/available-hosts.txt  — hostnames only, one per line
+#   results/gpu-status.txt       — included / skipped reasons
 #
-# Needs bash, ssh keys/agent (BatchMode), remote nvidia-smi.
+# Optional: -u USER, --hosts 01,05,10-12, -o OUT, --status STATUS
 
 set -euo pipefail
 
 REMOTE_USER="${REMOTE_USER:-${USER:-lidy}}"
-CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-5}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 PARALLEL="${PARALLEL:-8}"
-OUT="${OUT:-results/available-gpus.txt}"
+OUT="${OUT:-results/available-hosts.txt}"
+STATUS_OUT="${STATUS_OUT:-results/gpu-status.txt}"
 HOST_SPEC=""
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -66,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     -u|--user) REMOTE_USER=$2; shift 2 ;;
     -t|--timeout) CONNECT_TIMEOUT=$2; shift 2 ;;
     -o|--out) OUT=$2; shift 2 ;;
+    --status) STATUS_OUT=$2; shift 2 ;;
     -p|--parallel) PARALLEL=$2; shift 2 ;;
     --hosts) HOST_SPEC=$2; shift 2 ;;
     *)
@@ -84,47 +84,40 @@ else
   done
 fi
 
-mkdir -p "$(dirname "$OUT")"
+mkdir -p "$(dirname "$OUT")" "$(dirname "$STATUS_OUT")"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/probe-gpus.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# On the GPU box: print "INDEX|NAME" for free GPUs (0% util, <50 MiB used).
+# Count GPUs; always exit 0 so SSH success != "host has free GPU".
 REMOTE_CMD=$(cat <<'EOS'
+set +e
 if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo 'COUNT|0|no_nvidia_smi'
   exit 0
 fi
-nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null \
-  | while IFS=',' read -r idx name mem util; do
-      idx=$(echo "$idx" | tr -d ' ')
-      name=$(echo "$name" | sed 's/^ *//;s/ *$//')
-      mem=$(echo "$mem" | tr -d ' ')
-      util=$(echo "$util" | tr -d ' ')
-      [[ $mem == \[N/A\] ]] && mem=0
-      [[ $util == \[N/A\] ]] && util=0
-      if [[ $util =~ ^[0-9]+$ && $mem =~ ^[0-9]+$ ]] && ((util == 0 && mem < 50)); then
-        printf '%s|%s\n' "$idx" "$name"
-      fi
-    done
+n=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c . || true)
+echo "COUNT|${n}|ok"
+exit 0
 EOS
 )
 
 probe_one() {
   local host=$1
-  if ssh \
+  local rc=0
+  set +e
+  ssh \
     -o BatchMode=yes \
     -o ConnectTimeout="$CONNECT_TIMEOUT" \
     -o StrictHostKeyChecking=accept-new \
     -o ConnectionAttempts=1 \
     "${REMOTE_USER}@${host}" \
     "$REMOTE_CMD" >"${TMP}/${host}.out" 2>"${TMP}/${host}.err"
-  then
-    echo ok >"${TMP}/${host}.status"
-  else
-    echo fail >"${TMP}/${host}.status"
-  fi
+  rc=$?
+  set -e
+  echo "$rc" >"${TMP}/${host}.rc"
 }
 
-echo "Probing ${#HOSTS[@]} hosts as ${REMOTE_USER}@gpuNN (timeout=${CONNECT_TIMEOUT}s)"
+echo "Probing ${#HOSTS[@]} hosts as ${REMOTE_USER}@gpuNN (timeout=${CONNECT_TIMEOUT}s)" >&2
 
 running=0
 for host in "${HOSTS[@]}"; do
@@ -137,25 +130,66 @@ for host in "${HOSTS[@]}"; do
 done
 wait
 
+stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+: >"$OUT"
 {
-  echo "# available GPUs — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "# format: host  gpu_index  name"
+  echo "# GPU probe status — ${stamp}"
   echo "# ssh user: ${REMOTE_USER}"
+  echo "# include host if nvidia-smi reports ≥1 GPU (busy or free)"
   echo
-} >"$OUT"
+} >"$STATUS_OUT"
 
-available=0
+listed=0
 reachable=0
+unreachable=0
+
 for host in "${HOSTS[@]}"; do
-  status=$(cat "${TMP}/${host}.status" 2>/dev/null || echo fail)
-  [[ $status == ok ]] || continue
+  rc=$(cat "${TMP}/${host}.rc" 2>/dev/null || echo 255)
+  raw=${TMP}/${host}.out
+  err=${TMP}/${host}.err
+
+  if [[ $rc != 0 ]]; then
+    unreachable=$((unreachable + 1))
+    err_snip=$(tr '\n' ' ' <"$err" 2>/dev/null | head -c 160 || true)
+    echo "${host}: SKIP unreachable (ssh rc=${rc}) ${err_snip}" >>"$STATUS_OUT"
+    echo "${host}: unreachable" >&2
+    continue
+  fi
+
   reachable=$((reachable + 1))
-  while IFS='|' read -r idx name || [[ -n ${idx:-} ]]; do
-    [[ -z ${idx:-} ]] && continue
-    printf '%s\t%s\t%s\n' "$host" "$idx" "$name" >>"$OUT"
-    available=$((available + 1))
-  done <"${TMP}/${host}.out"
+  count_line=$(grep '^COUNT|' "$raw" | head -1 || true)
+  if [[ -z $count_line ]]; then
+    echo "${host}: SKIP no COUNT line from remote" >>"$STATUS_OUT"
+    echo "${host}: bad remote output" >&2
+    continue
+  fi
+
+  IFS='|' read -r _ count meta <<<"$count_line"
+  count=${count:-0}
+  meta=${meta:-}
+
+  if [[ $meta == no_nvidia_smi ]]; then
+    echo "${host}: SKIP no nvidia-smi" >>"$STATUS_OUT"
+    echo "${host}: no nvidia-smi" >&2
+    continue
+  fi
+
+  if ! [[ $count =~ ^[0-9]+$ ]] || ((count < 1)); then
+    echo "${host}: SKIP no GPU (count=${count})" >>"$STATUS_OUT"
+    echo "${host}: no GPU" >&2
+    continue
+  fi
+
+  printf '%s\n' "$host" >>"$OUT"
+  listed=$((listed + 1))
+  echo "${host}: OK gpus=${count}" >>"$STATUS_OUT"
 done
 
-echo "Reachable: ${reachable}/${#HOSTS[@]}; free GPUs: ${available}"
-echo "Wrote: ${OUT}"
+{
+  echo
+  echo "# summary: reachable ${reachable}/${#HOSTS[@]}, unreachable ${unreachable}, hosts with GPU ${listed}"
+} >>"$STATUS_OUT"
+
+echo "Reachable: ${reachable}/${#HOSTS[@]}; unreachable: ${unreachable}; hosts with GPU: ${listed}" >&2
+echo "Wrote: ${OUT}" >&2
+echo "Wrote: ${STATUS_OUT}" >&2
