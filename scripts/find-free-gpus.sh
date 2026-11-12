@@ -18,6 +18,19 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# Resolve relative paths against the repo root so aliases work from any cwd.
+repo_path() {
+  local p=$1
+  if [[ $p = /* ]]; then
+    printf '%s' "$p"
+  else
+    printf '%s' "${REPO_ROOT}/${p}"
+  fi
+}
+
 REMOTE_USER="${REMOTE_USER:-${USER:-lidy}}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 PARALLEL="${PARALLEL:-8}"
@@ -68,9 +81,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+HOSTS_FILE=$(repo_path "$HOSTS_FILE")
+OUT=$(repo_path "$OUT")
+
 if [[ ! -f $HOSTS_FILE ]]; then
   echo "error: host list not found: ${HOSTS_FILE}" >&2
-  echo "Run ./scripts/probe-gpus.sh first on this host (or any lab host with SSH to the GPUs), then retry." >&2
+  echo "Run ./scripts/probe-gpus.sh (or gpu-probe) first on this host (or any lab host with SSH to the GPUs), then retry." >&2
   exit 1
 fi
 

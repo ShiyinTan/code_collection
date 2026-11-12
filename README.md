@@ -11,6 +11,24 @@ Run on a lab host that can SSH to the GPUs (peter or a gpuNN box). First list ho
 ./scripts/find-free-gpus.sh
 ```
 
+### Quick aliases (no `cd`)
+
+Point aliases at absolute script paths. Outputs always go under the **repo** `results/` (not `$PWD`):
+
+```bash
+# put in ~/.bashrc — set REPO to your clone
+REPO=/path/to/code_collection
+alias gpu-probe="$REPO/scripts/probe-gpus.sh"
+alias gpu-free="$REPO/scripts/find-free-gpus.sh"
+```
+
+Then from any directory:
+
+```bash
+gpu-probe
+gpu-free
+```
+
 ### `probe-gpus.sh`
 
 - Includes a host if `nvidia-smi` reports ≥1 GPU (busy or free — no idle filter).

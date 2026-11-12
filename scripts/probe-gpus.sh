@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# probe-gpus.sh — From peter, list gpu01..gpu30 hosts that have GPUs.
+# probe-gpus.sh — List gpu01..gpu30 hosts that have GPUs.
 #
-# Run ON peter:
+# Run on a lab host that can SSH to the GPUs (peter or a gpuNN box):
 #   ./scripts/probe-gpus.sh
 #
 # SSH to each host (user: $USER or lidy). If nvidia-smi reports ≥1 GPU,
 # write the hostname. Skip unreachable hosts or hosts with no GPU.
 #
-# Outputs:
+# Outputs (under the repo, not $PWD):
 #   results/available-hosts.txt  — hostnames only, one per line
 #   results/gpu-status.txt       — included / skipped reasons
 #
@@ -15,6 +15,19 @@
 # SSH for the probe disables known_hosts checks (lab keys change often).
 
 set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# Resolve relative paths against the repo root so aliases work from any cwd.
+repo_path() {
+  local p=$1
+  if [[ $p = /* ]]; then
+    printf '%s' "$p"
+  else
+    printf '%s' "${REPO_ROOT}/${p}"
+  fi
+}
 
 REMOTE_USER="${REMOTE_USER:-${USER:-lidy}}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
@@ -24,7 +37,7 @@ STATUS_OUT="${STATUS_OUT:-results/gpu-status.txt}"
 HOST_SPEC=""
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -75,6 +88,9 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+OUT=$(repo_path "$OUT")
+STATUS_OUT=$(repo_path "$STATUS_OUT")
 
 HOSTS=()
 if [[ -n $HOST_SPEC ]]; then
