@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# probe-gpus.sh — From peter, list GPU hosts that have at least one free GPU.
+# probe-gpus.sh — From peter, list gpu01..gpu30 hosts that have GPUs.
 #
 # Run ON peter:
 #   ./scripts/probe-gpus.sh
 #
-# SSH to gpu01..gpu30 (user: $USER or lidy). A GPU is free when it has no
-# compute processes. If a host has ≥1 free GPU, its hostname is listed.
+# SSH to each host (user: $USER or lidy). If nvidia-smi reports ≥1 GPU,
+# write the hostname. Skip unreachable hosts or hosts with no GPU.
 #
 # Outputs:
-#   results/available-hosts.txt  — hostnames only, one per line (e.g. gpu03)
-#   results/gpu-status.txt       — why each host was included or skipped
+#   results/available-hosts.txt  — hostnames only, one per line
+#   results/gpu-status.txt       — included / skipped reasons
 #
 # Optional: -u USER, --hosts 01,05,10-12, -o OUT, --status STATUS
 
@@ -88,21 +88,15 @@ mkdir -p "$(dirname "$OUT")" "$(dirname "$STATUS_OUT")"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/probe-gpus.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# Always exit 0 after querying so a busy last-GPU / read-EOF cannot make SSH
-# look like failure (that bug previously dropped most free hosts).
+# Count GPUs; always exit 0 so SSH success != "host has free GPU".
 REMOTE_CMD=$(cat <<'EOS'
 set +e
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo 'META|no_nvidia_smi'
+  echo 'COUNT|0|no_nvidia_smi'
   exit 0
 fi
-echo 'META|ok'
-echo '---GPUS---'
-nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu \
-  --format=csv,noheader,nounits 2>/dev/null
-echo '---PROCS---'
-nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory \
-  --format=csv,noheader,nounits 2>/dev/null
+n=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c . || true)
+echo "COUNT|${n}|ok"
 exit 0
 EOS
 )
@@ -137,17 +131,15 @@ done
 wait
 
 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
 : >"$OUT"
-
 {
   echo "# GPU probe status — ${stamp}"
   echo "# ssh user: ${REMOTE_USER}"
-  echo "# include host in available-hosts.txt if ≥1 GPU has no compute process"
+  echo "# include host if nvidia-smi reports ≥1 GPU (busy or free)"
   echo
 } >"$STATUS_OUT"
 
-available_hosts=0
+listed=0
 reachable=0
 unreachable=0
 
@@ -165,81 +157,39 @@ for host in "${HOSTS[@]}"; do
   fi
 
   reachable=$((reachable + 1))
-  meta=$(sed -n 's/^META|//p' "$raw" | head -1)
+  count_line=$(grep '^COUNT|' "$raw" | head -1 || true)
+  if [[ -z $count_line ]]; then
+    echo "${host}: SKIP no COUNT line from remote" >>"$STATUS_OUT"
+    echo "${host}: bad remote output" >&2
+    continue
+  fi
+
+  IFS='|' read -r _ count meta <<<"$count_line"
+  count=${count:-0}
+  meta=${meta:-}
+
   if [[ $meta == no_nvidia_smi ]]; then
     echo "${host}: SKIP no nvidia-smi" >>"$STATUS_OUT"
     echo "${host}: no nvidia-smi" >&2
     continue
   fi
 
-  gpus_block=$(awk '/^---GPUS---$/{f=1;next}/^---PROCS---$/{f=0}f' "$raw")
-  procs_block=$(awk '/^---PROCS---$/{f=1;next}f' "$raw")
-
-  declare -A busy_uuid=()
-  declare -A busy_detail=()
-  while IFS= read -r line || [[ -n ${line:-} ]]; do
-    [[ -z ${line// } ]] && continue
-    IFS=',' read -r guuid pid pname used_mem <<<"$line"
-    guuid=$(trim "$guuid")
-    pid=$(trim "$pid")
-    pname=$(trim "$pname")
-    used_mem=$(trim "$used_mem")
-    [[ -z $guuid || $guuid == \[N/A\] ]] && continue
-    [[ -z $pid || $pid == \[N/A\] ]] && continue
-    busy_uuid[$guuid]=1
-    detail="pid=${pid} ${pname}"
-    if [[ -n $used_mem && $used_mem != \[N/A\] ]]; then
-      detail+=" (${used_mem} MiB)"
-    fi
-    if [[ -n ${busy_detail[$guuid]:-} ]]; then
-      busy_detail[$guuid]="${busy_detail[$guuid]}; ${detail}"
-    else
-      busy_detail[$guuid]=$detail
-    fi
-  done <<<"$procs_block"
-
-  free_idxs=()
-  busy_idxs=()
-  total=0
-
-  while IFS= read -r line || [[ -n ${line:-} ]]; do
-    [[ -z ${line// } ]] && continue
-    IFS=',' read -r idx uuid name mem_used mem_total util <<<"$line"
-    idx=$(trim "$idx")
-    uuid=$(trim "$uuid")
-    name=$(trim "$name")
-    [[ -z $idx ]] && continue
-    total=$((total + 1))
-    if [[ -n ${busy_uuid[$uuid]:-} ]]; then
-      busy_idxs+=("${idx}(${name}: ${busy_detail[$uuid]})")
-    else
-      free_idxs+=("$idx")
-    fi
-  done <<<"$gpus_block"
-
-  if ((total == 0)); then
-    echo "${host}: SKIP no GPUs reported" >>"$STATUS_OUT"
-    echo "${host}: no GPUs reported" >&2
-  elif ((${#free_idxs[@]} > 0)); then
-    printf '%s\n' "$host" >>"$OUT"
-    available_hosts=$((available_hosts + 1))
-    echo "${host}: AVAILABLE free_gpus=${#free_idxs[@]}/${total} indexes=$(IFS=,; echo "${free_idxs[*]}")" >>"$STATUS_OUT"
-  else
-    echo "${host}: SKIP no free GPU (all ${total} busy)" >>"$STATUS_OUT"
-    for b in "${busy_idxs[@]}"; do
-      echo "  busy gpu${b}" >>"$STATUS_OUT"
-    done
-    echo "${host}: no free GPU" >&2
+  if ! [[ $count =~ ^[0-9]+$ ]] || ((count < 1)); then
+    echo "${host}: SKIP no GPU (count=${count})" >>"$STATUS_OUT"
+    echo "${host}: no GPU" >&2
+    continue
   fi
 
-  unset busy_uuid busy_detail
+  printf '%s\n' "$host" >>"$OUT"
+  listed=$((listed + 1))
+  echo "${host}: OK gpus=${count}" >>"$STATUS_OUT"
 done
 
 {
   echo
-  echo "# summary: reachable ${reachable}/${#HOSTS[@]}, unreachable ${unreachable}, hosts with free GPU ${available_hosts}"
+  echo "# summary: reachable ${reachable}/${#HOSTS[@]}, unreachable ${unreachable}, hosts with GPU ${listed}"
 } >>"$STATUS_OUT"
 
-echo "Reachable: ${reachable}/${#HOSTS[@]}; unreachable: ${unreachable}; hosts with ≥1 free GPU: ${available_hosts}" >&2
+echo "Reachable: ${reachable}/${#HOSTS[@]}; unreachable: ${unreachable}; hosts with GPU: ${listed}" >&2
 echo "Wrote: ${OUT}" >&2
 echo "Wrote: ${STATUS_OUT}" >&2
