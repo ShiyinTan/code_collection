@@ -36,6 +36,12 @@ trim() {
   printf '%s' "$s"
 }
 
+# True if s looks like a usable nvidia UUID (non-empty, not [N/A]).
+valid_uuid() {
+  local s=$1
+  [[ -n $s && $s != \[N/A\] && $s != N/A ]]
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage 0 ;;
@@ -166,25 +172,42 @@ for host in "${HOSTS[@]}"; do
   gpus_block=$(awk '/^---GPUS---$/{f=1;next}/^---PROCS---$/{f=0}f' "$raw")
   procs_block=$(awk '/^---PROCS---$/{f=1;next}f' "$raw")
 
+  # Never index associative arrays with an empty key (bash: "bad array subscript").
   declare -A busy_uuid=()
   while IFS= read -r line || [[ -n ${line:-} ]]; do
-    [[ -z ${line// } ]] && continue
+    line=$(trim "$line")
+    [[ -z $line || $line == \#* ]] && continue
+    # Skip CSV header if present; skip pure [N/A] rows.
+    [[ $line == gpu_uuid* || $line == \[N/A\]* ]] && continue
     IFS=',' read -r guuid pid _rest <<<"$line"
-    guuid=$(trim "$guuid")
-    pid=$(trim "$pid")
-    [[ -z $guuid || $guuid == \[N/A\] ]] && continue
-    [[ -z $pid || $pid == \[N/A\] ]] && continue
+    guuid=$(trim "${guuid:-}")
+    pid=$(trim "${pid:-}")
+    valid_uuid "$guuid" || continue
+    [[ -n $pid && $pid != \[N/A\] && $pid != N/A ]] || continue
     busy_uuid[$guuid]=1
   done <<<"$procs_block"
 
   free_idxs=()
   while IFS= read -r line || [[ -n ${line:-} ]]; do
-    [[ -z ${line// } ]] && continue
+    line=$(trim "$line")
+    [[ -z $line || $line == \#* ]] && continue
+    [[ $line == index* ]] && continue
     IFS=',' read -r idx uuid name <<<"$line"
-    idx=$(trim "$idx")
-    uuid=$(trim "$uuid")
-    [[ -z $idx ]] && continue
-    if [[ -z ${busy_uuid[$uuid]:-} ]]; then
+    idx=$(trim "${idx:-}")
+    uuid=$(trim "${uuid:-}")
+    [[ -n $idx && $idx != \[N/A\] ]] || continue
+    # Empty/invalid UUID: cannot match compute apps; treat as free only if we
+    # have no busy set at all is wrong — skip unsafe blank-key lookup.
+    if ! valid_uuid "$uuid"; then
+      # Fall back: if there are zero compute apps, count free; else skip.
+      if ((${#busy_uuid[@]} == 0)); then
+        free_idxs+=("$idx")
+        printf '%s:%s\n' "$host" "$idx" >>"$OUT"
+        free_total=$((free_total + 1))
+      fi
+      continue
+    fi
+    if [[ -z ${busy_uuid[$uuid]+x} ]]; then
       free_idxs+=("$idx")
       printf '%s:%s\n' "$host" "$idx" >>"$OUT"
       free_total=$((free_total + 1))
