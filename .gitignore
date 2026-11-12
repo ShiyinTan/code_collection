@@ -1,0 +1,7 @@
+# Probe outputs (may contain host/user/process info from the lab)
+results/
+*.pem
+*.key
+id_rsa
+id_ed25519
+id_ecdsa
