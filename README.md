@@ -4,16 +4,14 @@ Code collections
 
 ## GPU probe
 
-Find free GPUs on `gpu01`–`gpu30`. **Run on peter** (lab network):
+List hosts among `gpu01`–`gpu30` that have **at least one free GPU**. **Run on peter**:
 
 ```bash
 ./scripts/probe-gpus.sh
 ```
 
-SSHs directly to each host as your user (default `$USER`, else `lidy`), checks `nvidia-smi`, and writes free GPUs to:
+- Free GPU = no nvidia compute process on that device (partially busy servers still count if any GPU is free).
+- `results/available-hosts.txt` — hostnames only, one per line (e.g. `gpu03`)
+- `results/gpu-status.txt` — reachable / skipped reasons (unreachable, fully busy, …)
 
-```text
-results/available-gpus.txt
-```
-
-Optional: `./scripts/probe-gpus.sh -u lidy` or `--hosts 01,05,10-12`. Output path is gitignored (`results/`).
+Optional: `./scripts/probe-gpus.sh -u lidy` or `--hosts 01,05,10-12`. `results/` is gitignored.
